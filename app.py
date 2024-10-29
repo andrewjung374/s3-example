@@ -1,4 +1,4 @@
-from flask import Flask, render_template, Response
+from flask import Flask, render_template, Response, request, jsonify
 # pip install flask opencv-python boto3
 import cv2
 import boto3
@@ -42,7 +42,7 @@ def capture_and_upload():
     ret, frame = camera.read()
     if not ret:
         print("Failed to capture image")
-        return "Failed to capture image"
+        return None, "Failed to capture image"
 
     # 이미지 파일 이름 생성 (현재 시간 기준)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -55,14 +55,22 @@ def capture_and_upload():
     try:
         s3.upload_file(filename, BUCKET_NAME, filename)
         print(f"Image uploaded successfully: {filename}")
+        
+        # pre-signed URL 생성 (1시간 동안 유효)
+        url = s3.generate_presigned_url('get_object',
+                                        Params={'Bucket': BUCKET_NAME,
+                                                'Key': filename},
+                                        ExpiresIn=3600)
+        print(url)
         result = f"Image uploaded successfully: {filename}"
     except Exception as e:
         print(f"Error uploading image: {str(e)}")
         result = f"Error uploading image: {str(e)}"
+        url = None
     
     # 임시 파일 삭제
     os.remove(filename)
-    return result
+    return url, result
 
 @app.route('/')
 def index():
@@ -74,8 +82,8 @@ def video_feed():
 
 @app.route('/capture', methods=['POST'])
 def capture():
-    result = capture_and_upload()
-    return result
+    url, result = capture_and_upload()
+    return jsonify({'url': url, 'result': result})
 
 if __name__ == '__main__':
     app.run(debug=True)

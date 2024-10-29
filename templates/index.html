@@ -7,7 +7,12 @@
         $(document).ready(function() {
             $('#captureBtn').click(function() {
                 $.post('/capture', function(data) {
-                    $('#result').text(data);
+                    $('#result').text(data.result);
+                    if (data.url) {
+                        $('#capturedImage').attr('src', data.url).show();
+                    } else {
+                        $('#capturedImage').hide();
+                    }
                 });
             });
         });
@@ -19,5 +24,6 @@
     <br>
     <button id="captureBtn">Capture and Upload</button>
     <p id="result"></p>
+    <img id="capturedImage" style="display:none; max-width:640px; max-height:480px;">
 </body>
 </html>
