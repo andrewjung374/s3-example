@@ -1,12 +1,23 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Camera Capture</title>
+    <title>Camera Stream and Capture</title>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script>
+        $(document).ready(function() {
+            $('#captureBtn').click(function() {
+                $.post('/capture', function(data) {
+                    $('#result').text(data);
+                });
+            });
+        });
+    </script>
 </head>
 <body>
-    <h1>Camera Capture and Upload</h1>
-    <form action="/capture" method="post">
-        <button type="submit">Capture and Upload</button>
-    </form>
+    <h1>Camera Stream and Capture</h1>
+    <img src="{{ url_for('video_feed') }}" width="640" height="480">
+    <br>
+    <button id="captureBtn">Capture and Upload</button>
+    <p id="result"></p>
 </body>
 </html>
