@@ -4,6 +4,34 @@ import cv2
 import boto3
 import os
 from datetime import datetime
+import mysql.connector
+import logging
+from logging.handlers import RotatingFileHandler
+import sys
+
+from dotenv import load_dotenv
+
+# .env 파일 로드
+load_dotenv()
+
+# 애플리케이션 로거 설정
+app_logger = logging.getLogger('app')
+app_logger.setLevel(logging.DEBUG)
+
+# 파일 핸들러 (애플리케이션 로그용)
+file_handler = RotatingFileHandler('app.log', maxBytes=1024 * 1024 * 100, backupCount=20)
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+app_logger.addHandler(file_handler)
+
+# 콘솔 핸들러
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+app_logger.addHandler(console_handler)
+
+# boto3 및 다른 라이브러리의 로그 레벨 조정
+logging.getLogger('boto3').setLevel(logging.WARNING)
+logging.getLogger('botocore').setLevel(logging.WARNING)
+logging.getLogger('urllib3').setLevel(logging.WARNING)
 
 app = Flask(__name__)
 
@@ -24,66 +52,196 @@ s3 = boto3.client('s3',
                   region_name=REGION_NAME,
                   endpoint_url=ENDPOINT_URL)
 
+# MySQL 연결 설정
+db_config = {
+  'host': os.getenv('DB_HOST'),
+  'user': os.getenv('DB_USER'),
+  'password': os.getenv('DB_PASSWORD'),
+  'database': os.getenv('DB_NAME'),
+  'unix_socket': None,  # TCP 연결 강제
+  'use_pure': True  # 순수 Python 구현 사용
+}
+
+# db_config = {
+#     'user': 'prjdb',
+#     'password': 'prjdb1022!',
+#     'host': 'db-2vh8mp-kr.vpc-pub-cdb.ntruss.com',
+#     'database': 'prjdb',
+#     'port': '3306',
+#     'unix_socket': None,  # TCP 연결 강제
+#     'use_pure': True,  # 순수 Python 구현 사용
+#     'connection_timeout': 10  # 10초 동안 연결 시도
+# }
+
 # 카메라 설정
 camera = cv2.VideoCapture(0)
 
+def get_db_connection():
+  app_logger.info("Attempting to connect to the database")
+  app_logger.debug(f"Attempting to connect with: host={db_config['host']}, user={db_config['user']}, database={db_config['database']}")
+  try:
+      conn = mysql.connector.connect(**db_config)
+      app_logger.info("Database connection successful")
+      return conn
+  except mysql.connector.Error as err:
+      app_logger.error(f"Database connection failed: {err}")
+      if err.errno == mysql.connector.errorcode.ER_ACCESS_DENIED_ERROR:
+          app_logger.error("Something is wrong with your user name or password")
+      elif err.errno == mysql.connector.errorcode.ER_BAD_DB_ERROR:
+          app_logger.error("Database does not exist")
+      else:
+          app_logger.error(f"Error: {err}")
+      raise  # 예외를 다시 발생시켜 상위 레벨에서 처리할 수 있게 함
+  except Exception as e:
+      app_logger.error(f"Unexpected error in get_db_connection: {e}")
+      raise
+
+def create_table_if_not_exists():
+  app_logger.info("Attempting to create table if not exists")
+  try:
+      conn = get_db_connection()
+      if conn is None:
+          app_logger.error("Failed to create table: Unable to connect to database")
+          return False
+
+      cursor = conn.cursor()
+      create_table_sql = '''
+      CREATE TABLE IF NOT EXISTS mart_receipts (
+          receipt_id INT AUTO_INCREMENT PRIMARY KEY,
+          receipt_image_url VARCHAR(255) NOT NULL,
+          member_id VARCHAR(100) NOT NULL,
+          items LONGTEXT
+      );
+      '''
+      cursor.execute(create_table_sql)
+      conn.commit()
+      app_logger.info("Table created or already exists.")
+      return True
+  except mysql.connector.Error as err:
+      app_logger.error(f"MySQL Error: {err}")
+      return False
+  except Exception as e:
+      app_logger.error(f"Unexpected error in create_table_if_not_exists: {e}")
+      return False
+  finally:
+      if 'cursor' in locals():
+          cursor.close()
+      if 'conn' in locals() and conn.is_connected():
+          conn.close()
+          app_logger.info("Database connection closed")
+
+def insert_receipt(receipt_image_url, member_id):
+  conn = get_db_connection()
+  if conn is None:
+      app_logger.error("Failed to insert receipt: Unable to connect to database")
+      return False
+
+  try:
+      cursor = conn.cursor()
+      insert_sql = '''
+      INSERT INTO mart_receipts (receipt_image_url, member_id)
+      VALUES (%s, %s);
+      '''
+      cursor.execute(insert_sql, (receipt_image_url, member_id))
+      conn.commit()
+      app_logger.info("Receipt info inserted successfully.")
+      return True
+  except mysql.connector.Error as err:
+      app_logger.error(f"Error inserting receipt info: {err}")
+      return False
+  finally:
+      if 'cursor' in locals():
+          cursor.close()
+      conn.close()
+
 def generate_frames():
-    while True:
-        success, frame = camera.read()
-        if not success:
-            break
-        else:
-            ret, buffer = cv2.imencode('.jpg', frame)
-            frame = buffer.tobytes()
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+  while True:
+      success, frame = camera.read()
+      if not success:
+          break
+      else:
+          ret, buffer = cv2.imencode('.jpg', frame)
+          frame = buffer.tobytes()
+          yield (b'--frame\r\n'
+                  b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
 def capture_and_upload():
-    ret, frame = camera.read()
-    if not ret:
-        print("Failed to capture image")
-        return None, "Failed to capture image"
+  ret, frame = camera.read()
+  if not ret:
+      app_logger.error("Failed to capture image")
+      return None, "Failed to capture image"
 
-    # 이미지 파일 이름 생성 (현재 시간 기준)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"captured_image_{timestamp}.jpg"
-    
-    # 이미지를 임시 파일로 저장
-    cv2.imwrite(filename, frame)
-    
-    # Object Storage에 업로드
-    try:
-        s3.upload_file(filename, BUCKET_NAME, filename)
-        print(f"Image uploaded successfully: {filename}")
-        
-        # pre-signed URL 생성 (1시간 동안 유효)
-        url = s3.generate_presigned_url('get_object',
+  # 이미지 파일 이름 생성 (현재 시간 기준)
+  timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+  filename = f"captured_image_{timestamp}.jpg"
+
+  
+  # 이미지를 임시 파일로 저장
+  cv2.imwrite(filename, frame)
+
+  # Object Storage에 업로드
+  try:
+      s3.upload_file(filename, BUCKET_NAME, filename)
+      app_logger.info(f"Image uploaded successfully: {filename}")
+      
+      image_url = f"https://{BUCKET_NAME}.{REGION_NAME}.object.ncloudstorage.com/{filename}"
+      
+      member_id = f"member_{timestamp}"
+      
+      if insert_receipt(image_url, member_id):
+          result = f"Image uploaded and receipt info saved: {filename}"
+          app_logger.info(result)
+      else:
+          result = "Image uploaded but failed to save receipt info"
+          app_logger.warning(result)
+  except Exception as e:
+      app_logger.error(f"Error in capture_and_upload: {str(e)}")
+      result = f"Error: {str(e)}"
+      image_url = None
+  finally:
+      if os.path.exists(filename):
+          os.remove(filename)
+      image_url = s3.generate_presigned_url('get_object',
                                         Params={'Bucket': BUCKET_NAME,
                                                 'Key': filename},
                                         ExpiresIn=3600)
-        print(url)
-        result = f"Image uploaded successfully: {filename}"
-    except Exception as e:
-        print(f"Error uploading image: {str(e)}")
-        result = f"Error uploading image: {str(e)}"
-        url = None
-    
-    # 임시 파일 삭제
-    os.remove(filename)
-    return url, result
+  
+  return image_url, result
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+  app_logger.info("Index page accessed")
+  return render_template('index.html')
 
 @app.route('/video_feed')
 def video_feed():
-    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+  app_logger.info("Video feed accessed")
+  return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 @app.route('/capture', methods=['POST'])
 def capture():
-    url, result = capture_and_upload()
-    return jsonify({'url': url, 'result': result})
+  app_logger.info("Capture route accessed")
+  try:
+      url, result = capture_and_upload()
+      return jsonify({'url': url, 'result': result})
+  except Exception as e:
+      app_logger.error(f"Error in capture route: {str(e)}")
+      return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True)
+  app_logger.setLevel(logging.DEBUG)
+  try:
+      app_logger.info("Starting application initialization")
+      if create_table_if_not_exists():
+          app_logger.info("Database table checked/created successfully")
+          app_logger.info("Starting Flask application")
+          app.run(debug=True)
+      else:
+          app_logger.critical("Failed to initialize database. Exiting application.")
+          sys.exit(1)
+  except mysql.connector.Error as err:
+      app_logger.critical(f"MySQL Error: {err}", exc_info=True)
+      sys.exit(1)
+  except Exception as e:
+      app_logger.critical(f"Failed to start application: {str(e)}", exc_info=True)
+      sys.exit(1)
