@@ -62,17 +62,6 @@ db_config = {
   'use_pure': True  # 순수 Python 구현 사용
 }
 
-# db_config = {
-#     'user': 'prjdb',
-#     'password': 'prjdb1022!',
-#     'host': 'db-2vh8mp-kr.vpc-pub-cdb.ntruss.com',
-#     'database': 'prjdb',
-#     'port': '3306',
-#     'unix_socket': None,  # TCP 연결 강제
-#     'use_pure': True,  # 순수 Python 구현 사용
-#     'connection_timeout': 10  # 10초 동안 연결 시도
-# }
-
 # 카메라 설정
 camera = cv2.VideoCapture(0)
 
